@@ -7,3 +7,13 @@ faiss-cpu
 sentence-transformers
 python-dotenv
 pypdf
+
+langchain==0.3.25
+langchain-core==0.3.59
+
+
+
+
+tiktoken
+PyPDF2
+pypdf
