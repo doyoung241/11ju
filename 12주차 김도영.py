@@ -1,6 +1,5 @@
 import os
 import streamlit as st
-from dotenv import load_dotenv
 
 from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -12,11 +11,8 @@ from langchain.chains import create_history_aware_retriever, create_retrieval_ch
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories.streamlit import StreamlitChatMessageHistory
 
-# .env 환경변수 불러오기
-load_dotenv()
-
-# 오픈AI API 키 환경 변수 등록
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+# 환경변수에서 OpenAI API 키 가져오기 (Streamlit Cloud에서는 Secrets에서 자동 할당)
+openai_api_key = os.environ["OPENAI_API_KEY"]
 
 # PDF 파일 로딩 및 분할
 @st.cache_resource
