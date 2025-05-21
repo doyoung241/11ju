@@ -1,152 +1,128 @@
-{
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": null,
-   "metadata": {
-    "vscode": {
-     "languageId": "plaintext"
-    }
-   },
-   "outputs": [],
-   "source": [
-    "import os\n",
-    "import streamlit as st\n",
-    "\n",
-    "from langchain.document_loaders import PyPDFLoader\n",
-    "from langchain.text_splitter import RecursiveCharacterTextSplitter\n",
-    "from langchain_openai import OpenAIEmbeddings, ChatOpenAI\n",
-    "from langchain.vectorstores import FAISS  # FAISS로 변경\n",
-    "from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder\n",
-    "from langchain.chains.combine_documents import create_stuff_documents_chain\n",
-    "from langchain.chains import create_history_aware_retriever, create_retrieval_chain\n",
-    "from langchain_core.runnables.history import RunnableWithMessageHistory\n",
-    "from langchain_community.chat_message_histories.streamlit import StreamlitChatMessageHistory\n",
-    "\n",
-    "# 오픈AI API 키 설정\n",
-    "load_dotenv()\n",
-    "os.environ[\"OPENAI_API_KEY\"] = os.getenv(\"OPENAI_API_KEY\")\n",
-    "\n",
-    "# cache_resource로 한번 실행한 결과 캐싱해두기\n",
-    "@st.cache_resource\n",
-    "def load_and_split_pdf(file_path):\n",
-    "    loader = PyPDFLoader(file_path)\n",
-    "    return loader.load_and_split()\n",
-    "\n",
-    "# 텍스트 청크들을 FAISS 안에 임베딩 벡터로 저장\n",
-    "@st.cache_resource\n",
-    "def create_vector_store(_docs):\n",
-    "    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)\n",
-    "    split_docs = text_splitter.split_documents(_docs)\n",
-    "    index_path = \"./faiss_index\"\n",
-    "    vectorstore = FAISS.from_documents(\n",
-    "        split_docs, \n",
-    "        OpenAIEmbeddings(model='text-embedding-3-small')\n",
-    "    )\n",
-    "    # FAISS는 저장 시 save_local 메서드 사용\n",
-    "    vectorstore.save_local(index_path)\n",
-    "    return vectorstore\n",
-    "\n",
-    "# 만약 기존에 저장해둔 FAISS가 있는 경우, 이를 로드\n",
-    "@st.cache_resource\n",
-    "def get_vectorstore(_docs):\n",
-    "    index_path = \"./faiss_index\"\n",
-    "    if os.path.exists(index_path):\n",
-    "        return FAISS.load_local(\n",
-    "            index_path,\n",
-    "            OpenAIEmbeddings(model='text-embedding-3-small')\n",
-    "        )\n",
-    "    else:\n",
-    "        return create_vector_store(_docs)\n",
-    "    \n",
-    "# PDF 문서 로드-벡터 DB 저장-검색기-히스토리 모두 합친 Chain 구축\n",
-    "@st.cache_resource\n",
-    "def initialize_components(selected_model):\n",
-    "    file_path = r\"../data/대한민국헌법(헌법)(제00010호)(19880225).pdf\"\n",
-    "    pages = load_and_split_pdf(file_path)\n",
-    "    vectorstore = get_vectorstore(pages)\n",
-    "    retriever = vectorstore.as_retriever()\n",
-    "\n",
-    "    # 채팅 히스토리 요약 시스템 프롬프트\n",
-    "    contextualize_q_system_prompt = \"\"\"Given a chat history and the latest user question \\\n",
-    "    which might reference context in the chat history, formulate a standalone question \\\n",
-    "    which can be understood without the chat history. Do NOT answer the question, \\\n",
-    "    just reformulate it if needed and otherwise return it as is.\"\"\"\n",
-    "    contextualize_q_prompt = ChatPromptTemplate.from_messages(\n",
-    "        [\n",
-    "            (\"system\", contextualize_q_system_prompt),\n",
-    "            MessagesPlaceholder(\"history\"),\n",
-    "            (\"human\", \"{input}\"),\n",
-    "        ]\n",
-    "    )\n",
-    "\n",
-    "    # 질문-답변 시스템 프롬프트\n",
-    "    qa_system_prompt = \"\"\"You are an assistant for question-answering tasks. \\\n",
-    "    Use the following pieces of retrieved context to answer the question. \\\n",
-    "    If you don't know the answer, just say that you don't know. \\\n",
-    "    Keep the answer perfect. please use imogi with the answer.\n",
-    "    대답은 한국어로 하고, 존댓말을 써줘.\\\n",
-    "\n",
-    "    {context}\"\"\"\n",
-    "    qa_prompt = ChatPromptTemplate.from_messages(\n",
-    "        [\n",
-    "            (\"system\", qa_system_prompt),\n",
-    "            MessagesPlaceholder(\"history\"),\n",
-    "            (\"human\", \"{input}\"),\n",
-    "        ]\n",
-    "    )\n",
-    "\n",
-    "    llm = ChatOpenAI(model=selected_model)\n",
-    "    history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)\n",
-    "    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)\n",
-    "    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)\n",
-    "    return rag_chain\n",
-    "\n",
-    "# Streamlit UI\n",
-    "st.header(\"헌법 Q&A 챗봇 💬 📚\")\n",
-    "option = st.selectbox(\"Select GPT Model\", (\"gpt-4o-mini\", \"gpt-3.5-turbo-0125\"))\n",
-    "rag_chain = initialize_components(option)\n",
-    "chat_history = StreamlitChatMessageHistory(key=\"chat_messages\")\n",
-    "\n",
-    "conversational_rag_chain = RunnableWithMessageHistory(\n",
-    "    rag_chain,\n",
-    "    lambda session_id: chat_history,\n",
-    "    input_messages_key=\"input\",\n",
-    "    history_messages_key=\"history\",\n",
-    "    output_messages_key=\"answer\",\n",
-    ")\n",
-    "\n",
-    "\n",
-    "if \"messages\" not in st.session_state:\n",
-    "    st.session_state[\"messages\"] = [{\"role\": \"assistant\", \n",
-    "                                     \"content\": \"헌법에 대해 무엇이든 물어보세요!\"}]\n",
-    "\n",
-    "for msg in chat_history.messages:\n",
-    "    st.chat_message(msg.type).write(msg.content)\n",
-    "\n",
-    "\n",
-    "if prompt_message := st.chat_input(\"Your question\"):\n",
-    "    st.chat_message(\"human\").write(prompt_message)\n",
-    "    with st.chat_message(\"ai\"):\n",
-    "        with st.spinner(\"Thinking...\"):\n",
-    "            config = {\"configurable\": {\"session_id\": \"any\"}}\n",
-    "            response = conversational_rag_chain.invoke(\n",
-    "                {\"input\": prompt_message},\n",
-    "                config)\n",
-    "            \n",
-    "            answer = response['answer']\n",
-    "            st.write(answer)\n",
-    "            with st.expander(\"참고 문서 확인\"):\n",
-    "                for doc in response['context']:\n",
-    "                    st.markdown(doc.metadata['source'], help=doc.page_content)\n"
-   ]
-  }
- ],
- "metadata": {
-  "language_info": {
-   "name": "python"
-  }
- },
- "nbformat": 4,
- "nbformat_minor": 2
-}
+import os
+import streamlit as st
+from dotenv import load_dotenv
+
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.vectorstores import FAISS
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_community.chat_message_histories.streamlit import StreamlitChatMessageHistory
+
+# .env 환경변수 불러오기
+load_dotenv()
+
+# 오픈AI API 키 환경 변수 등록
+os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+
+# PDF 파일 로딩 및 분할
+@st.cache_resource
+def load_and_split_pdf(file_path):
+    loader = PyPDFLoader(file_path)
+    return loader.load_and_split()
+
+# FAISS에 임베딩 저장
+@st.cache_resource
+def create_vector_store(_docs):
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+    split_docs = text_splitter.split_documents(_docs)
+    index_path = "./faiss_index"
+    vectorstore = FAISS.from_documents(
+        split_docs, 
+        OpenAIEmbeddings(model='text-embedding-3-small')
+    )
+    vectorstore.save_local(index_path)
+    return vectorstore
+
+# 기존 FAISS 인덱스가 있으면 불러오고, 없으면 새로 만듦
+@st.cache_resource
+def get_vectorstore(_docs):
+    index_path = "./faiss_index"
+    if os.path.exists(index_path):
+        return FAISS.load_local(
+            index_path,
+            OpenAIEmbeddings(model='text-embedding-3-small'),
+            allow_dangerous_deserialization=True
+        )
+    else:
+        return create_vector_store(_docs)
+
+# RAG 시스템 전체 파이프라인 구성
+@st.cache_resource
+def initialize_components(selected_model):
+    file_path = r"../data/대한민국헌법(헌법)(제00010호)(19880225).pdf"
+    pages = load_and_split_pdf(file_path)
+    vectorstore = get_vectorstore(pages)
+    retriever = vectorstore.as_retriever()
+
+    contextualize_q_system_prompt = """Given a chat history and the latest user question \
+    which might reference context in the chat history, formulate a standalone question \
+    which can be understood without the chat history. Do NOT answer the question, \
+    just reformulate it if needed and otherwise return it as is."""
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("history"),
+            ("human", "{input}"),
+        ]
+    )
+
+    qa_system_prompt = """You are an assistant for question-answering tasks. \
+    Use the following pieces of retrieved context to answer the question. \
+    If you don't know the answer, just say that you don't know. \
+    Keep the answer perfect. please use imogi with the answer.
+    대답은 한국어로 하고, 존댓말을 써줘.\
+
+    {context}"""
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", qa_system_prompt),
+            MessagesPlaceholder("history"),
+            ("human", "{input}"),
+        ]
+    )
+
+    llm = ChatOpenAI(model=selected_model)
+    history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+    return rag_chain
+
+# Streamlit UI 구성
+st.header("헌법 Q&A 챗봇 💬 📚")
+option = st.selectbox("Select GPT Model", ("gpt-4o-mini", "gpt-3.5-turbo-0125"))
+rag_chain = initialize_components(option)
+chat_history = StreamlitChatMessageHistory(key="chat_messages")
+
+conversational_rag_chain = RunnableWithMessageHistory(
+    rag_chain,
+    lambda session_id: chat_history,
+    input_messages_key="input",
+    history_messages_key="history",
+    output_messages_key="answer",
+)
+
+if "messages" not in st.session_state:
+    st.session_state["messages"] = [{"role": "assistant", 
+                                     "content": "헌법에 대해 무엇이든 물어보세요!"}]
+
+for msg in chat_history.messages:
+    st.chat_message(msg.type).write(msg.content)
+
+if prompt_message := st.chat_input("Your question"):
+    st.chat_message("human").write(prompt_message)
+    with st.chat_message("ai"):
+        with st.spinner("Thinking..."):
+            config = {"configurable": {"session_id": "any"}}
+            response = conversational_rag_chain.invoke(
+                {"input": prompt_message},
+                config)
+            
+            answer = response['answer']
+            st.write(answer)
+            with st.expander("참고 문서 확인"):
+                for doc in response['context']:
+                    st.markdown(doc.metadata['source'], help=doc.page_content)
